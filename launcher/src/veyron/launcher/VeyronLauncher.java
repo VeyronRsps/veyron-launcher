@@ -44,6 +44,11 @@ import javax.swing.plaf.basic.BasicProgressBarUI;
  * in place; then the client is started with this launcher's own Java and the launcher closes. When the update server
  * can't be reached, the client already there is started; without one, the player is told why it can't start.
  *
+ * The launcher updates itself the same way (2026-10-30): the server's launcher.sha256 against this jar's own; a new
+ * launcher.jar is downloaded next to this one, a copy of the new jar (with this launcher's Java) waits for this one to
+ * close, puts the new jar in its place and starts the launcher again. A launcher too old to do that is updated by the
+ * client (net.runelite.client.veyron.LauncherUpdater), which gets the jar's place in -Dveyron.launcher.jar.
+ *
  * -Dveyron.update.url=... points it elsewhere (testing), -Dveyron.home=... keeps the client somewhere else.
  */
 public class VeyronLauncher {
@@ -58,10 +63,18 @@ public class VeyronLauncher {
 	private JProgressBar bar;
 
 	public static void main(String[] args) {
-		new VeyronLauncher().run();
+		if (args.length >= 3 && args[0].equals("--apply-update")) {
+			applyUpdate(args);
+			return;
+		}
+		new VeyronLauncher(Arrays.asList(args).contains("--updated")).run();
 	}
 
-	private VeyronLauncher() {
+	/** started again by the update helper: no second self-update this time, whatever the hashes say */
+	private final boolean updated;
+
+	private VeyronLauncher(boolean updated) {
+		this.updated = updated;
 		try (InputStream in = VeyronLauncher.class.getResourceAsStream("/veyron_launcher.properties")) {
 			config.load(in);
 		} catch (Exception e) {
@@ -81,6 +94,8 @@ public class VeyronLauncher {
 		try {
 			if (!home.isDirectory() && !home.mkdirs())
 				throw new IOException("can't make " + home);
+			if (selfUpdate())
+				return;
 			update();
 		} catch (Exception e) {
 			if (!client.isFile()) {
@@ -93,10 +108,102 @@ public class VeyronLauncher {
 		launch();
 	}
 
+	/** this launcher's jar, null when it doesn't run from one (an IDE) */
+	static File ownJar() {
+		try {
+			File f = new File(VeyronLauncher.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+			return f.isFile() && f.getName().endsWith(".jar") ? f : null;
+		} catch (Exception e) {
+			return null;
+		}
+	}
+
+	/**
+	 * A newer launcher on the update server: downloaded and checked, then a helper (a copy of the new jar, run with this
+	 * launcher's Java) puts it in place once this one has closed and starts it. True when the helper took over. Any
+	 * problem (no launcher.sha256 on the server, a damaged download, a jar that can't be written) leaves this launcher
+	 * as it is.
+	 */
+	private boolean selfUpdate() {
+		File own = ownJar();
+		if (own == null || updated)
+			return false;
+		try {
+			say("Checking for updates...", -1);
+			String remote = remoteHash("launcher.sha256");
+			if (remote.equalsIgnoreCase(sha256(own)))
+				return false;
+			say("Updating the launcher...", -1);
+			File fresh = new File(own.getParentFile(), own.getName() + ".new");
+			download(updateUrl() + "launcher.jar", fresh);
+			if (!remote.equalsIgnoreCase(sha256(fresh))) {
+				fresh.delete();
+				return false;
+			}
+			File helper = File.createTempFile("veyron-launcher-update", ".jar");
+			helper.deleteOnExit();
+			Files.copy(fresh.toPath(), helper.toPath(), StandardCopyOption.REPLACE_EXISTING);
+			List<String> cmd = new ArrayList<>();
+			cmd.add(javaw());
+			cmd.add("-cp");
+			cmd.add(helper.getAbsolutePath());
+			cmd.add(VeyronLauncher.class.getName());
+			cmd.add("--apply-update");
+			cmd.add(fresh.getAbsolutePath());
+			cmd.add(own.getAbsolutePath());
+			// how to start the launcher again: the installed Veyron.exe (jpackage names it), else its jar with this Java
+			String exe = System.getProperty("jpackage.app-path");
+			if (exe != null && new File(exe).isFile()) {
+				cmd.add(exe);
+			} else {
+				cmd.add(javaw());
+				for (String p : Arrays.asList("veyron.update.url", "veyron.home"))
+					if (System.getProperty(p) != null)
+						cmd.add("-D" + p + "=" + System.getProperty(p));
+				cmd.add("-jar");
+				cmd.add(own.getAbsolutePath());
+			}
+			new ProcessBuilder(cmd).start();
+			say("Launcher updated, restarting...", 100);
+			pause(800);
+			System.exit(0);
+			return true;
+		} catch (Exception e) {
+			System.out.println("[launcher] self-update skipped: " + e);
+			return false;
+		}
+	}
+
+	/** the helper: waits until the old jar can be replaced (its launcher has closed), replaces it and starts the launcher */
+	private static void applyUpdate(String[] args) {
+		File fresh = new File(args[1]), own = new File(args[2]);
+		for (int i = 0; i < 120; i++) {
+			try {
+				Files.move(fresh.toPath(), own.toPath(), StandardCopyOption.REPLACE_EXISTING);
+				break;
+			} catch (IOException e) {
+				pause(500);
+			}
+		}
+		List<String> cmd = new ArrayList<>(Arrays.asList(args).subList(3, args.length));
+		cmd.add("--updated");
+		try {
+			new ProcessBuilder(cmd).start();
+		} catch (IOException e) {
+			System.out.println("[launcher] couldn't start the launcher again: " + e);
+		}
+		System.exit(0);
+	}
+
+	private static String javaw() {
+		return System.getProperty("java.home") + File.separator + "bin" + File.separator
+			+ (System.getProperty("os.name").toLowerCase().contains("win") ? "javaw.exe" : "java");
+	}
+
 	/** the server's client when it isn't the one here */
 	private void update() throws Exception {
 		say("Checking for updates...", -1);
-		String remote = remoteHash();
+		String remote = remoteHash("client.sha256");
 		if (remote.equalsIgnoreCase(sha256(client))) {
 			say("Your client is up to date", 100);
 			pause(400);
@@ -116,17 +223,17 @@ public class VeyronLauncher {
 			part.delete();
 			if (attempt == 1)
 				throw new IOException("the downloaded client was damaged (" + got + ")");
-			remote = remoteHash();
+			remote = remoteHash("client.sha256");
 		}
 	}
 
-	private String remoteHash() throws IOException {
-		HttpURLConnection c = connect(updateUrl() + "client.sha256");
+	private String remoteHash(String file) throws IOException {
+		HttpURLConnection c = connect(updateUrl() + file);
 		try (InputStream in = c.getInputStream()) {
 			String text = new String(readAll(in), StandardCharsets.US_ASCII).trim();
 			String hash = text.split("\\s+")[0];
 			if (hash.length() != 64)
-				throw new IOException("the update server sent no client hash");
+				throw new IOException("the update server sent no hash in " + file);
 			return hash;
 		} finally {
 			c.disconnect();
@@ -171,11 +278,14 @@ public class VeyronLauncher {
 	/** the client, with this launcher's Java (javaw on Windows, so no console); the launcher then closes */
 	private void launch() {
 		say("Starting Veyron...", 100);
-		String java = System.getProperty("java.home") + File.separator + "bin" + File.separator
-			+ (System.getProperty("os.name").toLowerCase().contains("win") ? "javaw.exe" : "java");
 		List<String> cmd = new ArrayList<>();
-		cmd.add(java);
+		cmd.add(javaw());
 		cmd.addAll(words(config.getProperty("jvm_args", "")));
+		// where this launcher and its updates are, for the client's launcher check (LauncherUpdater)
+		File own = ownJar();
+		if (own != null)
+			cmd.add("-Dveyron.launcher.jar=" + own.getAbsolutePath());
+		cmd.add("-Dveyron.update.url=" + updateUrl());
 		cmd.add("-jar");
 		cmd.add(client.getAbsolutePath());
 		cmd.addAll(words(config.getProperty("client_args", "")));
@@ -249,17 +359,14 @@ public class VeyronLauncher {
 		root.setBorder(BorderFactory.createCompoundBorder(BorderFactory.createLineBorder(new Color(0x5A, 0x14, 0x14), 2),
 			BorderFactory.createEmptyBorder(14, 22, 16, 22)));
 
+		// the Veyron emblem (2026-10-29, the new logo): it carries the name itself, so no name line under it
 		JLabel logo = new JLabel();
 		Image shield = image("/veyron_splash.png");
-		if (shield != null) logo.setIcon(new ImageIcon(shield.getScaledInstance(150, 150, Image.SCALE_SMOOTH)));
+		if (shield != null) logo.setIcon(new ImageIcon(shield.getScaledInstance(200, 200, Image.SCALE_SMOOTH)));
 		logo.setHorizontalAlignment(SwingConstants.CENTER);
-		JLabel name = new JLabel("VEYRON", SwingConstants.CENTER);
-		name.setForeground(TEXT);
-		name.setFont(new Font("Serif", Font.BOLD, 26));
 		JPanel top = new JPanel(new BorderLayout());
 		top.setOpaque(false);
 		top.add(logo, BorderLayout.CENTER);
-		top.add(name, BorderLayout.SOUTH);
 
 		status = new JLabel("Starting...", SwingConstants.CENTER);
 		status.setForeground(DIM);
@@ -279,7 +386,7 @@ public class VeyronLauncher {
 		root.add(top, BorderLayout.CENTER);
 		root.add(bottom, BorderLayout.SOUTH);
 		frame.setContentPane(root);
-		frame.setSize(360, 300);
+		frame.setSize(360, 310);
 		frame.setLocationRelativeTo(null);
 		frame.setVisible(true);
 	}
