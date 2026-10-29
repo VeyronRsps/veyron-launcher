@@ -15,7 +15,7 @@ The Java runtime inside the zip keeps its own signatures from Eclipse Adoptium a
 
 ## How
 
-- The project maintainer builds a release with `build.ps1` from a tagged commit of this repository.
+- The project maintainer (Topi, topinurmela99@gmail.com) builds a release with `build.ps1` from a tagged commit of this repository.
 - `sign.ps1` signs with `signtool` (SHA-256, RFC 3161 timestamp from Certum). The private key stays in Certum's
   SimplySign cloud and is unlocked with the maintainer's two-factor login for each signing session.
 - `signing.properties` (the certificate's thumbprint) is local only and never committed.

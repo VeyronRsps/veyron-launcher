@@ -44,6 +44,10 @@ files are signed during the build; without one they are built unsigned and the b
 | `icons/` | Windows icons for the exe files |
 | `build.ps1`, `sign.ps1` | Build and signing scripts |
 
+## Maintainer
+
+Topi, topinurmela99@gmail.com (the Veyron launcher's maintainer and the holder of its code signing certificate).
+
 ## Licence
 
 MIT, see [LICENSE](LICENSE).
