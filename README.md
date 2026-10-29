@@ -46,7 +46,7 @@ files are signed during the build; without one they are built unsigned and the b
 
 ## Maintainer
 
-Topi, topinurmela99@gmail.com (the Veyron launcher's maintainer and the holder of its code signing certificate).
+Topi, topi.nurmela@outlook.com (the Veyron launcher's maintainer and the holder of its code signing certificate).
 
 ## Licence
 
